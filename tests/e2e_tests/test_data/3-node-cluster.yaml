@@ -25,6 +25,7 @@ services:
       - QDRANT__CLUSTER__ENABLED=true
       - QDRANT__SERVICE__HARDWARE_REPORTING=true
       - QDRANT__LOG_LEVEL=DEBUG
+      - QDRANT__FEATURE_FLAGS__ALL=${QDRANT__FEATURE_FLAGS__ALL:-true}
     command: bash -c "sleep 5 && ./qdrant --bootstrap 'http://qdrant_primary:6335' --uri 'http://qdrant_2:6335'"
 
   qdrant_3:
@@ -37,4 +38,5 @@ services:
       - QDRANT__CLUSTER__ENABLED=true
       - QDRANT__SERVICE__HARDWARE_REPORTING=true
       - QDRANT__LOG_LEVEL=DEBUG
+      - QDRANT__FEATURE_FLAGS__ALL=${QDRANT__FEATURE_FLAGS__ALL:-true}
     command: bash -c "sleep 5 && ./qdrant --bootstrap 'http://qdrant_primary:6335' --uri 'http://qdrant_3:6335'"
