@@ -16359,7 +16359,9 @@
         "description": "Optimizations progress for the collection",
         "type": "object",
         "required": [
-          "ongoing"
+          "ongoing",
+          "planned",
+          "planned_points"
         ],
         "properties": {
           "ongoing": {
@@ -16376,6 +16378,17 @@
               "$ref": "#/components/schemas/ProgressTree"
             },
             "nullable": true
+          },
+          "planned": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "planned_points": {
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
           }
         }
       },
