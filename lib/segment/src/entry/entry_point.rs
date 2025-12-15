@@ -250,8 +250,8 @@ pub trait SegmentEntry: SnapshotEntry {
             .map(|sizes| sizes.into_iter().max().unwrap_or_default())
     }
 
-    /// Get segment ID (UUID for reporting)
-    fn segment_id(&self) -> OperationResult<String>;
+    /// Get segment uuid
+    fn segment_uuid(&self) -> OperationResult<String>;
 
     /// Get segment type
     fn segment_type(&self) -> SegmentType;

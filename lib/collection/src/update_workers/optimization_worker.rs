@@ -337,7 +337,11 @@ impl UpdateWorkers {
                 let resource_budget = optimizer_resource_budget.clone();
 
                 // Track optimizer status
-                let (tracker, progress) = Tracker::start(optimizer.as_ref().name(), nonoptimal_segment_uuids);
+                let (tracker, progress) = Tracker::start(
+                    optimizer.as_ref().name(),
+                    nsi.clone(),
+                    nonoptimal_segment_uuids,
+                );
                 let tracker_handle = tracker.handle();
 
                 let handle = spawn_stoppable(move |stopped| {
