@@ -98,8 +98,8 @@ pub struct Tracker {
     pub name: String,
     /// Segment IDs being optimized
     pub segment_ids: Vec<SegmentId>,
-    /// Segment UUIDs being optimized
-    pub segment_uuids: Vec<Option<String>>,
+    /// Segment UUIDs being optimized (same as segment_ids but filesystem aligned)
+    pub segment_uuids: Vec<String>,
     /// Start time of the optimizer
     pub state: Arc<Mutex<TrackerState>>,
     /// A read-only view to progress tracker
@@ -113,7 +113,7 @@ impl Tracker {
     pub fn start(
         name: impl Into<String>,
         segment_ids: Vec<SegmentId>,
-        segment_uuids: Vec<Option<String>>,
+        segment_uuids: Vec<String>,
     ) -> (Tracker, ProgressTracker) {
         let (progress_view, progress_tracker) = new_progress_tracker();
         let tracker = Self {
