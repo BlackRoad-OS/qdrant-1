@@ -12,11 +12,47 @@ use segment::types::*;
 use shard::query::scroll::{QueryScrollRequestInternal, ScrollOrder};
 use shard::retrieve::record_internal::RecordInternal;
 use shard::retrieve::retrieve_blocking::retrieve_blocking;
+use shard::scroll::ScrollRequestInternal;
 
 use super::Shard;
 use crate::DEFAULT_EDGE_TIMEOUT;
 
 impl Shard {
+    pub fn scroll(&self, request: ScrollRequestInternal) -> OperationResult<Vec<RecordInternal>> {
+        let ScrollRequestInternal {
+            offset,
+            limit,
+            filter,
+            with_payload,
+            with_vector,
+            order_by,
+        } = request;
+
+        let mut records = self.scroll_by_id(
+            offset,
+            limit.unwrap_or(ScrollRequestInternal::default_limit()),
+            with_payload
+                .as_ref()
+                .unwrap_or(&ScrollRequestInternal::default_with_payload()),
+            &with_vector,
+            filter.as_ref(),
+            HwMeasurementAcc::disposable(),
+        )?;
+
+        match order_by.map(OrderBy::from) {
+            Some(order_by) => records.sort_unstable_by(|a, b| match order_by.direction() {
+                Direction::Asc => (a.order_value, a.id).cmp(&(b.order_value, b.id)),
+                Direction::Desc => (a.order_value, a.id).cmp(&(b.order_value, b.id)).reverse(),
+            }),
+
+            None => {
+                records.sort_unstable_by_key(|record| record.id);
+            }
+        };
+
+        Ok(records)
+    }
+
     pub fn query_scroll(
         &self,
         request: &QueryScrollRequestInternal,
