@@ -66,6 +66,7 @@ fn p_square_vectors(c: &mut Criterion) {
                     dim,
                     count,
                     quantile,
+                    4,
                     &std::sync::atomic::AtomicBool::new(false),
                 )
                 .unwrap(),

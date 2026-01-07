@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use permutation_iterator::Permutor;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::EncodingError;
 use crate::p_square::P2Quantile;
@@ -36,17 +37,9 @@ pub(crate) fn find_quantile_interval<'a>(
         return Ok(None);
     }
 
-    let (slice_size, selected_vectors) =
-        take_random_vectors(vector_data, count, QUANTILE_SAMPLE_SIZE);
-
-    let mut data_slice = Vec::with_capacity(slice_size * dim);
-    for vector_data in selected_vectors {
-        if stopped.load(Ordering::Relaxed) {
-            return Err(EncodingError::Stopped);
-        }
-
-        data_slice.extend_from_slice(vector_data.as_ref());
-    }
+    let mut data_slice =
+        take_random_vectors(vector_data, dim, count, QUANTILE_SAMPLE_SIZE / dim, stopped)?;
+    let selected_vector_count = data_slice.len() / dim;
 
     let data_slice_len = data_slice.len();
     if data_slice_len < 4 {
@@ -55,7 +48,7 @@ pub(crate) fn find_quantile_interval<'a>(
 
     let cut_index = std::cmp::min(
         (data_slice_len - 1) / 2,
-        (slice_size as f32 * (1.0 - quantile) / 2.0) as usize,
+        (selected_vector_count as f32 * (1.0 - quantile) / 2.0) as usize,
     );
     let cut_index = std::cmp::max(cut_index, 1);
     let comparator = |a: &f32, b: &f32| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
@@ -78,15 +71,18 @@ pub fn find_interval_per_coordinate<'a>(
     dim: usize,
     count: usize,
     quantile: f32,
+    num_threads: usize,
     stopped: &AtomicBool,
 ) -> Result<Vec<(f32, f32)>, EncodingError> {
+    debug_assert!(quantile > 0.5 && quantile <= 1.0);
+
     // In case of max quantile, return min-max per dimension
-    if quantile == 1.0 {
+    if quantile >= 1.0 {
         return find_min_max_interval_per_coordinate(vector_data, dim, count, stopped);
     }
 
-    // Single thread case
-    find_interval_per_coordinate_p2(vector_data, dim, count, quantile, stopped)
+    // Otherwise, use P Square algorithm to estimate quantile intervals
+    find_interval_per_coordinate_p2(vector_data, dim, count, quantile, num_threads, stopped)
 }
 
 fn find_min_max_interval_per_coordinate<'a>(
@@ -100,27 +96,12 @@ fn find_min_max_interval_per_coordinate<'a>(
         result.push((f32::MAX, f32::MIN));
     }
 
-    let (_, selected_vectors) = take_random_vectors(vector_data, count, P2_SAMPLE_SIZE);
+    let selected_vectors = take_random_vectors(vector_data, dim, count, P2_SAMPLE_SIZE, stopped)?;
 
-    for vector in selected_vectors {
-        if stopped.load(Ordering::Relaxed) {
-            return Err(EncodingError::Stopped);
-        }
-
-        let vector = vector.as_ref();
-        debug_assert_eq!(
-            vector.len(),
-            dim,
-            "Vector length does not match the expected dimension"
-        );
-
-        for (i, min_max) in result.iter_mut().enumerate() {
-            if vector[i] < min_max.0 {
-                min_max.0 = vector[i];
-            }
-            if vector[i] > min_max.1 {
-                min_max.1 = vector[i];
-            }
+    for vector in selected_vectors.chunks_exact(dim) {
+        for ((min, max), &value) in result.iter_mut().zip(vector.iter()) {
+            *min = min.min(value);
+            *max = max.max(value);
         }
     }
 
@@ -138,68 +119,81 @@ fn find_interval_per_coordinate_p2<'a>(
     dim: usize,
     count: usize,
     quantile: f32,
+    num_threads: usize,
     stopped: &AtomicBool,
 ) -> Result<Vec<(f32, f32)>, EncodingError> {
-    let mut p_squares: Vec<(P2Quantile<P2_MARKERS>, P2Quantile<P2_MARKERS>)> = (0..dim)
-        .map(|_| {
-            (
-                P2Quantile::<P2_MARKERS>::new(1.0 - f64::from(quantile)).unwrap(),
-                P2Quantile::<P2_MARKERS>::new(f64::from(quantile)).unwrap(),
-            )
-        })
-        .collect();
+    let selected_vectors = take_random_vectors(vector_data, dim, count, P2_SAMPLE_SIZE, stopped)?;
 
-    let (_, selected_vectors) = take_random_vectors(vector_data, count, P2_SAMPLE_SIZE);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .thread_name(|idx| format!("p-square-{idx}"))
+        .num_threads(num_threads.max(1))
+        .build()
+        .map_err(|e| {
+            EncodingError::EncodingError(format!(
+                "Failed P Square estimation while thread pool init: {e}"
+            ))
+        })?;
 
-    for vector in selected_vectors {
-        if stopped.load(Ordering::Relaxed) {
-            return Err(EncodingError::Stopped);
-        }
+    // Process each dimension in parallel
+    pool.install(|| {
+        (0..dim)
+            .into_par_iter()
+            .map(|d| -> Result<(f32, f32), EncodingError> {
+                // Because quantile parameter (like 95%) is defined for both tails,
+                // we need to divide by 2.0 to get the correct min and max quantiles.
+                let min_quantile = (1.0 - f64::from(quantile)) / 2.0;
+                let mut min = P2Quantile::<P2_MARKERS>::new(min_quantile)?;
 
-        let vector = vector.as_ref();
-        debug_assert_eq!(
-            vector.len(),
-            dim,
-            "Vector length does not match the expected dimension"
-        );
+                let max_quantile = 1.0 - min_quantile;
+                let mut max = P2Quantile::<P2_MARKERS>::new(max_quantile)?;
 
-        for d in 0..dim {
-            p_squares[d].0.push(f64::from(vector[d]));
-            p_squares[d].1.push(f64::from(vector[d]));
-        }
-    }
-    let mut result = Vec::with_capacity(dim);
-    for (p_square_min, p_square_max) in p_squares {
-        result.push((
-            p_square_min.estimate() as f32,
-            p_square_max.estimate() as f32,
-        ));
-    }
-    Ok(result)
+                for vector in selected_vectors.chunks_exact(dim) {
+                    if stopped.load(Ordering::Relaxed) {
+                        return Err(EncodingError::Stopped);
+                    }
+
+                    let value = f64::from(vector[d]);
+                    min.push(value);
+                    max.push(value);
+                }
+
+                Ok((min.estimate() as f32, max.estimate() as f32))
+            })
+            .collect()
+    })
 }
 
+// Take random vectors from the input iterator using `Permutor`.
+// To reduce allocations count, all selected vectors are flattened into a single Vec<f32>.
 fn take_random_vectors<'a>(
     vector_data: impl Iterator<Item = impl AsRef<[f32]> + 'a>,
+    dim: usize,
     count: usize,
     sample_size: usize,
-) -> (usize, impl Iterator<Item = impl AsRef<[f32]> + 'a>) {
+    stopped: &AtomicBool,
+) -> Result<Vec<f32>, EncodingError> {
     let slice_size = std::cmp::min(count, sample_size);
     let permutor = Permutor::new(count as u64);
     let mut selected_vectors: Vec<usize> = permutor.map(|i| i as usize).take(slice_size).collect();
     selected_vectors.sort_unstable();
 
-    (
-        slice_size,
-        vector_data
-            .enumerate()
-            .filter_map(move |(vector_index, vector)| {
-                if selected_vectors.binary_search(&vector_index).is_ok() {
-                    Some(vector)
-                } else {
-                    None
-                }
-            }),
-    )
+    let mut data_slice = Vec::with_capacity(slice_size * dim);
+    let mut selected_index: usize = 0;
+    for (vector_index, vector_data) in vector_data.into_iter().enumerate() {
+        if stopped.load(Ordering::Relaxed) {
+            return Err(EncodingError::Stopped);
+        }
+
+        if vector_index == selected_vectors[selected_index] {
+            data_slice.extend_from_slice(vector_data.as_ref());
+            selected_index += 1;
+            if selected_index == slice_size {
+                break;
+            }
+        }
+    }
+
+    Ok(data_slice)
 }
 
 #[cfg(test)]
@@ -232,18 +226,21 @@ mod tests {
             DIM,
             COUNT,
             quantile,
+            2,
             &AtomicBool::new(false),
         )
         .unwrap();
 
-        let acc = 0.1;
-        for (min, max) in per_coordinate.into_iter() {
+        let acc = 0.05;
+        let min_result = (1.0 - quantile).abs() / 2.0;
+        let max_result = 1.0 - min_result;
+        for (min, max) in per_coordinate {
             assert!(
-                (min - (1.0 - quantile).abs() < acc),
+                ((min - min_result).abs() < acc),
                 "Min value is out of expected range"
             );
             assert!(
-                (max - quantile).abs() < acc,
+                ((max - max_result).abs() < acc),
                 "Max value is out of expected range"
             );
         }
